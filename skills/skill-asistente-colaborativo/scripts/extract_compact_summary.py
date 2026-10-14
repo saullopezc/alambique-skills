@@ -16,7 +16,8 @@ lee.
 
 Uso:
   extract_compact_summary.py [project_dir]                   (manual)
-  echo "$HOOK_JSON" | extract_compact_summary.py             (hook SessionStart:compact)
+  echo "$HOOK_JSON" | extract_compact_summary.py --caduca AAAA-MM-DD
+                                                             (hook SessionStart:compact)
   extract_compact_summary.py --marcar-destilado <memoria> [project_dir]
   extract_compact_summary.py --help
 
@@ -30,9 +31,13 @@ Uso:
   a git, no se guarda nada y se dice. Fuera de un repositorio, <capa> es
   project_dir. Un resumen idéntico a uno ya guardado no se duplica.
 
-  Cada ejecución que guarda el resumen, o lo encuentra ya guardado, deja una
-  línea en <capa>/_local/context/.registro_compactacion.log. La que no llega
-  a guardar no tiene dónde escribir sin riesgo: deja solo su aviso.
+  En modo hook, --caduca es obligatorio: es el último día en que vale el alta,
+  y lo pone el instalador. Sin él, o pasada la fecha, no se guarda nada y se
+  dice cómo renovarla. En uso manual no cuenta: hay alguien al teclado.
+
+  Cada ejecución del guardado —guarde, lo encuentre ya guardado o no llegue
+  a guardar— deja una línea en <conf>/projects/.registro_compactacion.log,
+  junto a los transcripts.
 
   --marcar-destilado cierra el ciclo de destilado: da por consolidados en
   <memoria> (un nombre, no una ruta) los resúmenes pendientes y lo anota en
@@ -50,8 +55,14 @@ Uso:
 Como hook va en SessionStart con matcher "compact" — después de compactar, que
 es cuando el resumen existe en el transcript; en PreCompact aún no se ha
 escrito. Corre sin turno, y su alcance es ese: leer el transcript de la sesión
-y escribir en la capa local ignorada; nada más. El alta no caduca sola: dura
-hasta `instalar.sh --quitar`.
+y escribir en la capa local ignorada y en su registro; nada más. El alta
+caduca en la fecha de --caduca; `instalar.sh` la renueva y `instalar.sh
+--quitar` la retira antes.
+
+Módulos, por responsabilidad: harness.py (dónde guarda Claude Code sus
+sesiones), alcance.py (dónde puede escribir, hasta cuándo y su registro),
+destilado.py (el ciclo de destilado). Este fichero lee el transcript, guarda
+el resumen y compone lo que el hook devuelve al modelo.
 
 En modo hook lee por stdin el JSON del evento y usa su transcript_path y su
 cwd. No busca otro transcript si ese falta: el más reciente por fecha puede
@@ -71,91 +82,21 @@ Modified Date: 2026-10-14
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
+# Los módulos hermanos se importan por la ruta del script, también con -I o -P
+# (que no la añaden), y sin dejar __pycache__ en la copia instalada.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-class Fin(Exception):
-    """Final previsto sin nada guardado: código de salida manual y motivo."""
-
-    def __init__(self, codigo: int, motivo: str):
-        super().__init__(motivo)
-        self.codigo = codigo
-        self.motivo = motivo
-
-
-def diag(texto: str) -> None:
-    """Diagnóstico: a stderr, para que en un hook no entre al contexto del modelo."""
-    print(texto, file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# Configuración del harness
-# ---------------------------------------------------------------------------
-
-def conf_harness() -> Path:
-    """
-    Directorio de configuración del harness. ALAMBIQUE_CONF manda; si no,
-    ~/.claude: este script solo entiende el formato de Claude Code.
-    """
-    conf = os.environ.get("ALAMBIQUE_CONF")
-    if conf:
-        return Path(conf)
-    return Path.home() / ".claude"
-
-
-def cwd_to_claude_slug(cwd: str) -> str:
-    """
-    Convierte una ruta absoluta de proyecto al slug que Claude Code usa en
-    <conf>/projects/.
-
-    Ejemplos:
-      C:\\Users\\<usuario>\\Proyectos\\mi_app  ->  c--Users-<usuario>-Proyectos-mi-app
-      /home/<usuario>/proyectos/mi-app         ->  -home-<usuario>-proyectos-mi-app
-
-    Cubre cuatro caracteres: "_", "/", "\\" y los ":" de la unidad de Windows.
-    El resto (punto, espacio, letras con tilde, ñ...) pasa tal cual, y la regla
-    del harness para ellos no está comprobada: con una ruta que los contenga
-    el slug puede no coincidir con el directorio real. En ese caso el uso
-    manual no encuentra la sesión y lo dice; el modo hook no depende del slug
-    para leer el transcript, solo para nombrar el directorio de memoria.
-    """
-    path = cwd.replace("\\", "/").replace("_", "-")
-
-    # Windows: C:/... -> c--...
-    if len(path) >= 2 and path[1] == ":":
-        drive = path[0].lower()
-        rest = path[2:].lstrip("/")
-        path = drive + "--" + rest
-
-    # Unix: la barra inicial no se descarta; se traduce a "-".
-    return path.replace("/", "-")
-
-
-def find_claude_projects_dir() -> Path:
-    """Retorna <conf>/projects/"""
-    return conf_harness() / "projects"
-
-
-def find_most_recent_jsonl(project_slug: str) -> "Path | None":
-    """
-    El .jsonl más reciente (por fecha de modificación) de
-    <conf>/projects/{slug}/, sin contar sesiones casi vacías (< 10 KB).
-    Solo para uso manual: con varias sesiones abiertas puede no ser la propia.
-    """
-    project_dir = find_claude_projects_dir() / project_slug
-
-    if not project_dir.is_dir():
-        diag(f"WARN: directorio de transcripts no encontrado: {project_dir}")
-        return None
-
-    jsonl_files = [f for f in project_dir.glob("*.jsonl") if f.stat().st_size > 10_000]
-    if not jsonl_files:
-        return None
-    return max(jsonl_files, key=lambda f: f.stat().st_mtime)
+from alcance import (  # noqa: E402
+    PATRON_RESUMEN, capa_local, comprobar_alta, directorio_contexto, registrar,
+)
+from destilado import aviso_destilado, marcar_destilado  # noqa: E402
+from harness import Fin, cwd_to_claude_slug, diag, find_most_recent_jsonl  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -243,73 +184,6 @@ def extract_summary(jsonl_path: Path) -> tuple:
 # Guardado del resumen
 # ---------------------------------------------------------------------------
 
-PATRON_RESUMEN = "*_compact_summary*.md"
-
-
-def directorio_contexto(project_dir: Path) -> Path:
-    """
-    Destino de los resúmenes: {project_dir}/_local/context/, la capa local.
-    Lo que se guarda es el resumen crudo, con comandos, salidas y rutas reales:
-    project_dir tiene que venir de capa_local(), que comprueba que git lo ignora.
-    """
-    return project_dir / "_local" / "context"
-
-
-# Lo que se pregunta a git: un fichero con el nombre de los que se guardan.
-PRUEBA_IGNORADO = "_local/context/00000000_000000_compact_summary.md"
-
-
-def _git(nivel: Path, *orden: str) -> "subprocess.CompletedProcess | None":
-    """Una orden git en `nivel`; None si git no está o no responde."""
-    try:
-        return subprocess.run(
-            ["git", "-C", str(nivel), *orden],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def capa_local(project_dir: Path) -> Path:
-    """
-    El nivel cuya _local/ recibe lo que este script escribe.
-
-    Fuera de un repositorio git, project_dir. Dentro, el primer nivel desde
-    project_dir hasta la raíz del repositorio cuyo `_local/context/` ignora
-    git: un `_local/**` en el .gitignore de la raíz solo casa en la raíz, y
-    con el directorio de trabajo en un subdirectorio el resumen quedaría sin
-    ignorar. Si ninguno lo ignora, o git no responde, no se escribe: Fin.
-    """
-    if not any((d / ".git").exists() for d in (project_dir, *project_dir.parents)):
-        return project_dir
-    r = _git(project_dir, "rev-parse", "--show-toplevel")
-    if r is None or r.returncode != 0 or not r.stdout.strip():
-        raise Fin(1, f"no puedo preguntar a git si _local/ está ignorado en {project_dir}")
-    raiz = Path(r.stdout.strip()).resolve()
-    nivel = project_dir
-    while True:
-        r = _git(nivel, "check-ignore", "-q", PRUEBA_IGNORADO)
-        if r is not None and r.returncode == 0:
-            return nivel
-        if nivel == raiz or nivel.parent == nivel:
-            break
-        nivel = nivel.parent
-    raise Fin(
-        1,
-        f"git no ignora _local/ ni en {project_dir} ni subiendo hasta {raiz}; "
-        "añade `_local/**` a su .gitignore",
-    )
-
-
-def registrar(capa: Path, linea: str) -> None:
-    """Una línea por ejecución en el registro de la capa; si falla, solo se dice."""
-    try:
-        with open(directorio_contexto(capa) / ".registro_compactacion.log", "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {linea}\n")
-    except OSError as e:
-        diag(f"AVISO: no se pudo escribir el registro de ejecución: {e}")
-
-
 def cuerpo_de(texto: str) -> str:
     """El resumen guardado, sin su línea de título."""
     if texto.startswith("# "):
@@ -391,127 +265,6 @@ def leer_evento_hook() -> tuple:
     except ValueError:
         return {}, True
     return (evento if isinstance(evento, dict) else {}), True
-
-
-# ---------------------------------------------------------------------------
-# Destilado: de N resúmenes a UNA memoria persistente
-# ---------------------------------------------------------------------------
-
-# Cada compactación deja su .md (detalle). Al llegar al umbral, los pendientes
-# se consolidan en una sola memoria. El número es alto a propósito: destilar
-# cada sesión produce crónica, no lineamiento.
-UMBRAL_POR_DEFECTO = 10
-ESTADO_DESTILADO = ".destilado_estado.json"
-
-
-def umbral_destilado() -> int:
-    """ALAMBIQUE_DESTILADO_UMBRAL si es un entero >= 1; si no, el de por defecto."""
-    crudo = os.environ.get("ALAMBIQUE_DESTILADO_UMBRAL")
-    if crudo is None or not crudo.strip():
-        return UMBRAL_POR_DEFECTO
-    try:
-        valor = int(crudo)
-    except ValueError:
-        valor = 0
-    if valor < 1:
-        diag(
-            f"WARN: ALAMBIQUE_DESTILADO_UMBRAL={crudo!r} no es un entero >= 1; "
-            f"se usa {UMBRAL_POR_DEFECTO}"
-        )
-        return UMBRAL_POR_DEFECTO
-    return valor
-
-
-def _ruta_estado(context_dir: Path) -> Path:
-    return context_dir / ESTADO_DESTILADO
-
-
-def leer_estado(context_dir: Path) -> dict:
-    """El estado del destilado; uno vacío si falta o no tiene la forma esperada."""
-    vacio = {"destilados": [], "memorias": []}
-    try:
-        estado = json.loads(_ruta_estado(context_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return vacio
-    if not isinstance(estado, dict):
-        return vacio
-    for clave in vacio:
-        if not isinstance(estado.get(clave), list):
-            estado[clave] = []
-    return estado
-
-
-def pendientes_de_destilar(context_dir: Path) -> list:
-    """Resúmenes guardados que aún no se han consolidado en una memoria."""
-    ya = {n for n in leer_estado(context_dir)["destilados"] if isinstance(n, str)}
-    return sorted(
-        f.name for f in context_dir.glob(PATRON_RESUMEN) if f.name not in ya
-    )
-
-
-def marcar_destilado(project_dir: Path, memoria: str) -> int:
-    """
-    Cierra el ciclo: da por destilados los resúmenes pendientes y anota qué
-    memoria los resume; sin esto el aviso se repite en cada compactación.
-    Si no hay pendientes no escribe nada.
-    """
-    context_dir = directorio_contexto(project_dir)
-    pendientes = pendientes_de_destilar(context_dir)
-    if not pendientes:
-        return 0
-    estado = leer_estado(context_dir)
-    estado["destilados"] = sorted(
-        {n for n in estado["destilados"] if isinstance(n, str)} | set(pendientes)
-    )
-    estado["memorias"].append({
-        "memoria": memoria,
-        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "compactaciones": len(pendientes),
-    })
-    _ruta_estado(context_dir).write_text(
-        json.dumps(estado, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    return len(pendientes)
-
-
-def aviso_destilado(project_dir: Path, context_dir: Path) -> str:
-    """
-    Una línea de cuenta mientras no se llega al umbral; al llegar, el bloque
-    completo. El criterio va escrito aquí porque es lo que separa una memoria
-    útil de un anecdotario.
-    """
-    umbral = umbral_destilado()
-    pendientes = pendientes_de_destilar(context_dir)
-    if len(pendientes) < umbral:
-        return f"(destilado: {len(pendientes)}/{umbral} compactaciones pendientes)"
-
-    # La ruta solo se da si existe: el slug puede no coincidir con el real.
-    memoria = find_claude_projects_dir() / cwd_to_claude_slug(str(project_dir)) / "memory"
-    destino = (
-        f"{memoria}/ (más su línea en el índice MEMORY.md)"
-        if memoria.parent.is_dir()
-        else "la memoria persistente del proyecto"
-    )
-    return "\n".join([
-        "",
-        f"TOCA DESTILAR — hay {len(pendientes)} compactaciones sin consolidar.",
-        f"Conviértelas en UNA sola memoria. Va en: {destino}",
-        "",
-        "Criterio, y es lo que decide si la memoria sirve:",
-        "  SÍ  — lo que cambia cómo se trabaja en este proyecto: lineamientos,",
-        "        decisiones vigentes, trampas del entorno, qué instrumento hay",
-        "        que mirar antes de concluir, qué no se toca.",
-        "  NO  — la crónica: quién hizo qué, en qué sesión, en qué orden, con",
-        "        cuántos intentos. Eso ya está en los resúmenes.",
-        "  Prueba: si la frase solo sirve para contar la historia y no cambia",
-        "  cómo se trabaja la próxima vez, no es memoria.",
-        "",
-        f"Fuentes a leer antes de escribirla, en {context_dir}:",
-    ] + [f"  - {n}" for n in pendientes] + [
-        "",
-        "Al terminar, cierra el ciclo o el aviso se repetirá:",
-        f"  python3 {Path(__file__).resolve()} --marcar-destilado <nombre-memoria> {project_dir}",
-    ])
 
 
 # ---------------------------------------------------------------------------
@@ -629,10 +382,22 @@ def cli_marcar_destilado(args: list) -> int:
     return 0
 
 
-def guardar(args: list, evento: dict, es_hook: bool) -> int:
+def separar_caducidad(args: list) -> tuple:
+    """(args sin `--caduca <fecha>`, la fecha o None)."""
+    if "--caduca" not in args:
+        return args, None
+    i = args.index("--caduca")
+    if i + 1 >= len(args):
+        raise Fin(2, "--caduca necesita una fecha AAAA-MM-DD")
+    return args[:i] + args[i + 2:], args[i + 1]
+
+
+def guardar(args: list, evento: dict, es_hook: bool, caduca: "str | None") -> int:
     """Localiza el transcript, extrae el resumen y lo guarda."""
     if any(a.startswith("-") for a in args) or len(args) > 1:
         raise Fin(2, "argumentos no reconocidos; ver --help")
+    if es_hook:
+        comprobar_alta(caduca)
 
     # Directorio del proyecto: argumento > cwd del evento > cwd del proceso
     if args:
@@ -676,8 +441,8 @@ def guardar(args: list, evento: dict, es_hook: bool) -> int:
 
     capa = capa_local(project_dir)
     output_path, es_nuevo = save_summary(capa, summary, compact_ts)
-    registrar(capa, f"{'hook' if es_hook else 'manual'} {jsonl_path.name} "
-                    f"{'guardado' if es_nuevo else 'ya-guardado'} {output_path.name}")
+    registrar("hook" if es_hook else "manual", "guardado" if es_nuevo else "ya-guardado",
+              f"{output_path} (transcript {jsonl_path.name})")
 
     if es_hook:
         print(recordatorio_operacion(capa, output_path))
@@ -694,17 +459,22 @@ def main() -> int:
         print(ayuda())
         return 0
 
-    es_hook = False
+    es_hook = es_guardado = False
     try:
         if "--marcar-destilado" in args:
             return cli_marcar_destilado(args)
+        es_guardado = True
         evento, es_hook = leer_evento_hook()
-        return guardar(args, evento, es_hook)
+        args, caduca = separar_caducidad(args)
+        return guardar(args, evento, es_hook, caduca)
     except Fin as e:
         motivo, codigo = e.motivo, e.codigo
     except Exception as e:  # ningún fallo imprevisto termina en traza
         motivo, codigo = f"error inesperado, {type(e).__name__}: {e}", 1
 
+    # La ejecución que no guarda también deja constancia (R-09).
+    if es_guardado:
+        registrar("hook" if es_hook else "manual", "no-guardado", motivo)
     if not es_hook:
         diag(f"ERROR: {motivo}")
         return codigo

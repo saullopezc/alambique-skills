@@ -16,6 +16,7 @@ necesitan.
 ```sh
 ./instalar.sh                 # las tres skills, en cada harness detectado
 ./instalar.sh <skill> ...     # solo las que se nombren
+./instalar.sh --dias=N ...    # el alta del guardado de compactación vale N días (por defecto, 90)
 ./instalar.sh --quitar        # retira el registro del guardado de compactación
 ```
 
@@ -35,8 +36,12 @@ Una vez dado de alta, tras cada compactación guarda el resumen en `_local/conte
 solo donde git lo ignora: desde el directorio de trabajo de la sesión sube hasta la raíz
 del repositorio y usa el primer nivel cuyo `_local/` esté ignorado. Si ninguno lo está, no
 guarda nada y lo dice. Ignorarlo lo pone el marco, o una línea propia en `.gitignore`;
-este instalador no. Cada ejecución que guarda deja una línea en
-`_local/context/.registro_compactacion.log`. El alta no caduca sola: dura hasta `--quitar`.
+este instalador no.
+
+Corre sin nadie al teclado, así que su alta está acotada: caduca a los 90 días
+(`--dias=N` para otro plazo). Pasada la fecha no guarda y dice cómo renovarla;
+reinstalar la renueva y `--quitar` la retira antes. Cada ejecución, guarde o no, deja
+una línea en `<conf>/projects/.registro_compactacion.log`, junto a los transcripts.
 Al juntarse diez resúmenes avisa de que toca destilarlos a la memoria
 persistente, y el ciclo se cierra con
 `extract_compact_summary.py --marcar-destilado <memoria> [project_dir]`.

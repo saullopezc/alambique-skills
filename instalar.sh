@@ -6,6 +6,8 @@
 # Uso:
 #   ./instalar.sh                 todas las skills, en cada harness detectado
 #   ./instalar.sh <skill> ...     solo las que se nombren
+#   ./instalar.sh --dias=N ...    el alta del guardado de compactación vale N
+#                                 días (1-366; por defecto, 90)
 #   ./instalar.sh --quitar        retira el registro del guardado de compactación
 #   ./instalar.sh --help          esta ayuda; no instala nada
 #
@@ -25,11 +27,15 @@
 #     demás harness ese guardado no aplica, y se dice. Tampoco se da de alta si
 #     la skill instalada no la puso este instalador, ni si esta pasada no
 #     instala `skill-asistente-colaborativo`: instalar otra skill no reactiva un
-#     registro que se retiró con `--quitar`.
+#     registro que se retiró con `--quitar`. El alta caduca: el comando del
+#     hook lleva `--caduca AAAA-MM-DD` y, pasada esa fecha, el script no guarda
+#     y dice cómo renovarla.
 #
-# Repetirlo deja el mismo contenido y el mismo registro; cada skill se vuelve a
-# copiar y la fecha de su marcador se renueva. `--quitar` retira solo ese registro; las skills se borran a mano:
-# son los directorios de <conf>/skills/ que contienen el marcador.
+# Repetirlo deja el mismo contenido y un solo registro, con la caducidad
+# renovada desde hoy; cada skill se vuelve a copiar y la fecha de su marcador
+# se renueva. `--quitar` retira solo ese registro. Las skills se retiran a
+# mano, moviendo fuera de <conf>/skills/ los directorios que contienen el
+# marcador: nada de lo que se retira se borra.
 #
 # Salidas: 0 sin fallos (puede haber skills respetadas) · 1 alguna pieza falló.
 #
@@ -71,11 +77,16 @@ say() { printf '%s\n' "$*"; }
 ok()  { printf '  ok   %s\n' "$*"; }
 avi() { printf '  AVISO %s\n' "$*"; }
 
-MODO="instalar"; PEDIDAS=""
+MODO="instalar"; PEDIDAS=""; DIAS=90
 for a in "$@"; do
     case "$a" in
-        -h|--help) grep '^#' "$0" | sed -n '3,34p' | cut -c3-; exit 0 ;;
+        -h|--help) grep '^#' "$0" | sed -n '3,41p' | cut -c3-; exit 0 ;;
         --quitar)  MODO="quitar" ;;
+        --dias=*)  DIAS="${a#--dias=}"
+                   case "$DIAS" in ''|*[!0-9]*) DIAS=0 ;; esac
+                   if [ "$DIAS" -lt 1 ] || [ "$DIAS" -gt 366 ]; then
+                       echo "--dias tiene que ser un entero de 1 a 366: $a" >&2; exit 1
+                   fi ;;
         -*) echo "opción desconocida: $a  (ver --help)" >&2; exit 1 ;;
         *)  if [ ! -r "$AQUI/skills/$a/SKILL.md" ]; then
                 echo "no existe la skill: $a" >&2; exit 1
@@ -112,12 +123,16 @@ destinos() {
 # se pisa: si el fichero no es JSON válido no se toca, y se escribe a través de
 # un enlace simbólico conservando el modo.
 #   registro_hook <conf> poner|quitar <ruta del script>
+# Un hook es nuestro si su comando empieza por la ruta del script, con o sin
+# caducidad: así poner renueva la fecha en su sitio y quitar lo encuentra.
 # Devuelve 0 hecho o ya estaba · 1 error · 2 falta python3 · 3 configuración ilegible.
 registro_hook() {
     command -v python3 >/dev/null 2>&1 || return 2
-    python3 - "$1" "$2" "$3" "$SELLO" <<'PY'
-import json, os, shlex, shutil, stat, sys
-conf, modo, ruta, sello = sys.argv[1:5]
+    python3 - "$1" "$2" "$3" "$SELLO" "$DIAS" <<'PY'
+import datetime, json, os, shlex, shutil, stat, sys
+conf, modo, ruta, sello, dias = sys.argv[1:6]
+caduca = (datetime.date.today() + datetime.timedelta(days=int(dias))).isoformat()
+comando = "%s --caduca %s" % (shlex.quote(ruta), caduca)
 fichero = os.path.join(conf, "settings.json")
 real = os.path.realpath(fichero)
 previo = None
@@ -136,15 +151,24 @@ else:
         print("  AVISO %s no es un objeto JSON: no se toca" % fichero)
         sys.exit(3)
 antes = json.dumps(cfg, sort_keys=True)
-formas = {ruta, shlex.quote(ruta)}
+def nuestro(h):
+    if not isinstance(h, dict) or not isinstance(h.get("command"), str):
+        return False
+    try:
+        partes = shlex.split(h["command"])
+    except ValueError:
+        return False
+    return bool(partes) and partes[0] == ruta
 hooks = cfg.get("hooks")
 grupos = hooks.get("SessionStart") if isinstance(hooks, dict) else None
 esta = False
 if isinstance(grupos, list):
     for g in grupos:
         for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
-            if isinstance(h, dict) and h.get("command") in formas:
+            if nuestro(h):
                 esta = True
+                if modo == "poner":
+                    h["command"] = comando      # renueva la caducidad
 if modo == "poner":
     if not esta:
         if not isinstance(hooks, dict):
@@ -153,14 +177,14 @@ if modo == "poner":
             hooks["SessionStart"] = []
         hooks["SessionStart"].append(
             {"matcher": "compact",
-             "hooks": [{"type": "command", "command": shlex.quote(ruta)}]})
+             "hooks": [{"type": "command", "command": comando}]})
+    print("  alta hasta el %s (inclusive)" % caduca)
 else:
     if isinstance(grupos, list):
         nuevos = []
         for g in grupos:
             if isinstance(g, dict) and isinstance(g.get("hooks"), list):
-                resto = [h for h in g["hooks"]
-                         if not (isinstance(h, dict) and h.get("command") in formas)]
+                resto = [h for h in g["hooks"] if not nuestro(h)]
                 if len(resto) != len(g["hooks"]):
                     if not resto:
                         continue        # el grupo era solo este hook
@@ -223,7 +247,7 @@ if [ "$MODO" = "quitar" ]; then
 $DESTINOS
 EOF
     say ""
-    say "Las skills se borran a mano: los directorios de <conf>/skills/ con $MARCADOR"
+    say "Las skills se retiran a mano: se mueven fuera de <conf>/skills/ los directorios con $MARCADOR"
     [ "$FALLOS" -gt 0 ] && exit 1
     exit 0
 fi
@@ -284,6 +308,6 @@ EOF
 say ""
 say "skills: $PUESTAS puestas · $RESPETADAS respetadas · $FALLOS fallos"
 say "guardado de compactación: $ST_HOOK"
-say "Para retirarlas: borrar en <conf>/skills/ los directorios que contengan $MARCADOR"
+say "Para retirarlas: mover fuera de <conf>/skills/ los directorios que contengan $MARCADOR"
 [ "$FALLOS" -gt 0 ] && exit 1
 exit 0

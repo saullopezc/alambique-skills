@@ -244,7 +244,9 @@ Piezas de la memoria de sesión:
   al reanudar. Lo guarda `scripts/extract_compact_summary.py`, que **solo vale en Claude Code** (lee
   el JSONL de sus transcripts): registrado como hook `SessionStart` con matcher `compact`, se guarda
   solo tras cada compactación; sin el hook, se ejecuta a mano (`extract_compact_summary.py
-  [project_dir]`). Solo escribe donde git ignora `_local/` —sube hasta la raíz del repositorio
+  [project_dir]`). Como hook corre sin turno, así que su alta caduca: el comando lleva
+  `--caduca AAAA-MM-DD` (lo pone `instalar.sh`, a 90 días), y sin esa fecha o pasada no guarda y
+  dice cómo renovarla. Cada ejecución queda en `<conf>/projects/.registro_compactacion.log`. Solo escribe donde git ignora `_local/` —sube hasta la raíz del repositorio
   buscándolo—, y si no lo encuentra no guarda nada y lo dice: entonces el punto de retorno se
   escribe a mano. En otro harness, el punto de retorno se escribe a mano al reanudar.
 - **Ciclo de destilado:** cada resumen guardado queda pendiente. Al juntarse 10
